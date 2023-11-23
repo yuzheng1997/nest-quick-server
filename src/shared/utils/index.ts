@@ -14,3 +14,7 @@ export const getTimestamp = () => {
     localeStringOptions as Intl.DateTimeFormatOptions,
   );
 };
+
+export const isString = (val: any): val is string => {
+  return typeof val === 'string';
+};

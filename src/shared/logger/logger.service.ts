@@ -4,24 +4,49 @@ import {
   Optional,
 } from '@nestjs/common';
 import * as process from 'process';
-import { TransformableInfo } from 'logform';
+import { Format, TransformableInfo } from 'logform';
 import { bold, cyan, green, magenta, red, yellow } from '@colors/colors';
 import { createLogger, format, Logger, transports } from 'winston';
-import { getTimestamp, parseCallStack, Stack } from '../utils';
+import { getTimestamp, isString, parseCallStack, Stack } from '../utils';
 import { LoggerDefaultOptions } from './logger.constans';
 import 'winston-daily-rotate-file';
+import { isPlainObject } from '@nestjs/common/utils/shared.utils';
 
 export let stack: Partial<Stack>;
 
+const getContext = (meta: any[] | Record<string, any>) => {
+  if (isPlainObject(meta)) {
+    meta.length = Object.keys(meta).length;
+    meta = Array.from(meta as ArrayLike<any>);
+  }
+  if (isString(meta[meta.length - 1])) return meta[meta.length - 1];
+  return '';
+};
+
 export const getPid = () => {
-  return green(`[Nest] ${process.pid}  - `);
+  return `[Nest] ${process.pid}  - `;
 };
 
 export const defaultFormat = (info: TransformableInfo) => {
-  const { level, message, context, ms } = info;
-  return `${getPid()}${getTimestamp()}${formatLevel(level)}${formatContext(
-    context,
-  )}${green(message)} ${yellow(ms)}`;
+  const { level, message, ms, metadata = {} } = info;
+  const context = getContext(metadata);
+  const levelUpper = level.toUpperCase();
+  const shader = LevelShader[levelUpper] || bold;
+  return `${green(getPid())}${getTimestamp()}${shader(
+    levelUpper.padStart(7, ' '),
+  )}${green(formatContext(context))}${green(message)} ${yellow(ms)}`;
+};
+
+const getLoggerFormat = (
+  print: (info: TransformableInfo) => string = defaultFormat,
+  labelData?: Record<string, any>,
+): Format => {
+  return format.combine(
+    format.metadata(labelData),
+    format.ms(),
+    format.timestamp(),
+    format.printf(print),
+  );
 };
 
 const LevelShader = {
@@ -31,31 +56,25 @@ const LevelShader = {
   ERROR: red,
 };
 export const formatLevel = (level: string) => {
-  level = level.toUpperCase();
-  const shader = LevelShader[level] || bold;
-  return ` ${shader(level)} `.padStart(7, ' ');
+  return ` ${level} `.padStart(7, ' ');
 };
 export const formatContext = (context: string) => {
-  context = context ? context : stack.className;
+  if (context) {
+    return ` [${context}] `;
+  }
   let result = '';
-  if (context) result += ` [${yellow(context)}] `;
-  if (stack.functionName) result += `[method: ${yellow(stack.functionName)}] `;
+  if (stack) result += ` [${stack.className} method: ${stack.functionName}] `;
   return result;
 };
 
 @Injectable()
 export class LoggerService implements NestLoggerService {
-  private context: string;
   private options: Record<string, any>;
   private logger: Logger;
 
   constructor();
-  constructor(context?: string);
-  constructor(
-    @Optional() context?: string,
-    @Optional() options?: Record<string, any>,
-  ) {
-    this.context = context;
+  constructor();
+  constructor(@Optional() options?: Record<string, any>) {
     this.options = options;
     this.init();
   }
@@ -64,11 +83,7 @@ export class LoggerService implements NestLoggerService {
     const logger = createLogger();
     const consoleTransport = new transports.Console({
       level: 'info',
-      format: format.combine(
-        format.ms(),
-        format.timestamp(),
-        format.printf(defaultFormat),
-      ),
+      format: getLoggerFormat(),
     });
     const options = {
       dirname: LoggerDefaultOptions.logDir,
@@ -78,11 +93,12 @@ export class LoggerService implements NestLoggerService {
     const errorDailyRotateFile = new transports.DailyRotateFile({
       filename: LoggerDefaultOptions.errorFileName,
       level: 'error',
-      format: format.combine(
-        format.ms(),
-        format.timestamp(),
-        format.printf(defaultFormat),
-      ),
+      format: getLoggerFormat((info) => {
+        const { level, message, context } = info;
+        return `${getPid()}${getTimestamp()}${level
+          .toUpperCase()
+          .padStart(7, ' ')}${formatContext(context)}${message.stack}`;
+      }),
       ...options,
     });
     logger.add(consoleTransport);
@@ -132,15 +148,16 @@ export class LoggerService implements NestLoggerService {
     this.printMessage('fatal', message, meta);
   }
 
-  printMessage(level: string, message: any, ...mate: any[]) {
+  printMessage(level: string, message: any, ...meta: any[]) {
     let data: Error;
     if (message instanceof Error) {
       data = message;
       stack = parseCallStack(data);
-    } else {
+      // 没有传入context通过错误栈获取
+    } else if (!getContext(meta)) {
       data = new Error();
-      stack = parseCallStack(data, 4);
+      stack = parseCallStack(data, 3);
     }
-    this.logger.log(level, message, mate);
+    this.logger.log(level, message, ...meta);
   }
 }
